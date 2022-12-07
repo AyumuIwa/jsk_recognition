@@ -6,6 +6,7 @@ import rospy
 import message_filters
 import PyKDL
 
+import cv2
 import numpy as np
 
 import tf2_ros
@@ -17,6 +18,7 @@ import threading
 
 from sound_play.libsoundplay import SoundClient
 
+from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import Image
 from jsk_recognition_msgs.msg import PanoramaInfo
 from jsk_recognition_msgs.msg import RectArray, ClassificationResult
@@ -49,23 +51,53 @@ class RectArrayInPanoramaToBoundingBoxArray(object):
         self._frame_fixed = rospy.get_param( '~frame_fixed', 'fixed_frame' )
         self._dimensions_labels = rospy.get_param( '~dimensions_labels', {} )
         self._duration_timeout = rospy.get_param( '~duration_timeout', 0.05 )
+        image_transport = rospy.get_param('~image_transport', 'raw')
 
-        try:
-            msg_panorama_image = rospy.wait_for_message(
-                '~panorama_image', Image, 10)
-            msg_panorama_info = rospy.wait_for_message(
-                '~panorama_info', PanoramaInfo, 10)
-        except (rospy.ROSException, rospy.ROSInterruptException) as e:
-            rospy.logerr('{}'.format(e))
+        if image_transport == 'raw':
+            panorama_image_name = rospy.resolve_name('~panorama_image')
+            panorama_image_type = Image
+        elif image_transport == 'compressed':
+            panorama_image_name = '{}/compressed'.format(rospy.resolve_name('~panorama_image'))
+            panorama_image_type = CompressedImage
+        else:
+            rospy.logerr('Unknown image transport: {}'.format(image_transport))
             sys.exit(1)
+
+        msg_panorama_image = None
+        msg_panorama_info = None
+        while (not rospy.is_shutdown() and
+                (msg_panorama_image is None
+                    or msg_panorama_info is None)):
+            try:
+                if msg_panorama_image is None:
+                    msg_panorama_image = rospy.wait_for_message(
+                        panorama_image_name, panorama_image_type, 10)
+                if msg_panorama_info is None:
+                    msg_panorama_info = rospy.wait_for_message(
+                        '~panorama_info', PanoramaInfo, 10)
+            except (rospy.ROSException, rospy.ROSInterruptException) as e:
+                rospy.logwarn('Waiting for ~panorama_image and ~panorama_info')
+                # rospy.logerr('{}'.format(e))
+                # sys.exit(1)
 
         self._frame_panorama = msg_panorama_info.header.frame_id
         self._theta_min = msg_panorama_info.theta_min
         self._theta_max = msg_panorama_info.theta_max
         self._phi_min = msg_panorama_info.phi_min
         self._phi_max = msg_panorama_info.phi_max
-        self._image_height = msg_panorama_image.height
-        self._image_width = msg_panorama_image.width
+
+        if image_transport == 'raw':
+            panorama_image_height = msg_panorama_image.height
+            panorama_image_width = msg_panorama_image.width
+        else:
+            np_arr = np.fromstring(msg_panorama_image.data, np.uint8)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            img = img[:, :, ::-1]
+            panorama_image_height = img.shape[0]
+            panorama_image_width = img.shape[1]
+
+        self._image_height = panorama_image_height
+        self._image_width = panorama_image_width
  
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer)
@@ -116,7 +148,8 @@ class RectArrayInPanoramaToBoundingBoxArray(object):
                         self._tf_buffer.lookup_transform(
                             self._frame_fixed,
                             self._frame_panorama,
-                            time_current,
+                            rospy.Time(0),
+                            # time_current,
                             timeout=rospy.Duration(self._duration_timeout)
                             )
                     )
